@@ -22,6 +22,7 @@
 import datetime
 
 from openerp.osv import fields, osv
+from openerp.tools import ustr
 from openerp.tools.translate import _
 
 import openerp.addons.decimal_precision as dp
@@ -118,7 +119,7 @@ class crossovered_budget_lines(osv.osv):
             acc_ids = [x.id for x in line.general_budget_id.account_ids]
             acc_ids = account_obj._get_children_and_consol(cr, uid, acc_ids, context=context)
             if not acc_ids:
-                raise osv.except_osv(_('Error!'),_("The Budget '%s' has no accounts!") % str(line.general_budget_id.name))
+                raise osv.except_osv(_('Error!'),_("The Budget '%s' has no accounts!") % ustr(line.general_budget_id.name))
             date_to = line.date_to
             date_from = line.date_from
             if context.has_key('wizard_date_from'):
@@ -180,7 +181,7 @@ class crossovered_budget_lines(osv.osv):
                     elapsed = strToDate(date_to) - strToDate(date_to)
 
                 if total.days:
-                    theo_amt = float(elapsed.days / float(total.days)) * line.planned_amount
+                    theo_amt = float((elapsed.days + 1) / float(total.days + 1)) * line.planned_amount
                 else:
                     theo_amt = line.planned_amount
 

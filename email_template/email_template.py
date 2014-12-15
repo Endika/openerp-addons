@@ -305,7 +305,7 @@ class email_template(osv.osv):
                           is taken from template definition)
            :returns: a dict containing all relevant fields for creating a new
                      mail.mail entry, with one extra key ``attachments``, in the
-                     format expected by :py:meth:`mail_thread.message_post`.
+                     format [(report_name, data)] where data is base64 encoded.
         """
         if context is None:
             context = {}
@@ -340,7 +340,9 @@ class email_template(osv.osv):
                 ctx['lang'] = self.render_template(cr, uid, template.lang, template.model, res_id, context)
             service = netsvc.LocalService(report_service)
             (result, format) = service.create(cr, uid, [res_id], {'model': template.model}, ctx)
-            result = base64.b64encode(result)
+            # TODO in trunk, change return format to binary to match message_post expected format
+            if not ctx['default_composition_mode'] == 'mass_mail':
+                result = base64.b64encode(result)
             if not report_name:
                 report_name = report_service
             ext = "." + format

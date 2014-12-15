@@ -26,9 +26,9 @@ from pytz import timezone
 import pytz
 
 from openerp.osv import fields, osv
+from openerp.tools import DEFAULT_SERVER_DATE_FORMAT, DEFAULT_SERVER_DATETIME_FORMAT
 from openerp.tools.translate import _
 from openerp import netsvc
-from openerp.tools import DEFAULT_SERVER_DATE_FORMAT, DEFAULT_SERVER_DATETIME_FORMAT
 
 class hr_timesheet_sheet(osv.osv):
     _name = "hr_timesheet_sheet.sheet"
@@ -66,40 +66,20 @@ class hr_timesheet_sheet(osv.osv):
     def copy(self, cr, uid, ids, *args, **argv):
         raise osv.except_osv(_('Error!'), _('You cannot duplicate a timesheet.'))
 
-    def create(self, cr, uid, vals, *args, **argv):
+    def create(self, cr, uid, vals, context=None):
         if 'employee_id' in vals:
-            if not self.pool.get('hr.employee').browse(cr, uid, vals['employee_id']).user_id:
+            if not self.pool.get('hr.employee').browse(cr, uid, vals['employee_id'], context=context).user_id:
                 raise osv.except_osv(_('Error!'), _('In order to create a timesheet for this employee, you must assign it to a user.'))
-            if not self.pool.get('hr.employee').browse(cr, uid, vals['employee_id']).product_id:
+            if not self.pool.get('hr.employee').browse(cr, uid, vals['employee_id'], context=context).product_id:
                 raise osv.except_osv(_('Error!'), _('In order to create a timesheet for this employee, you must link the employee to a product, like \'Consultant\'.'))
-            if not self.pool.get('hr.employee').browse(cr, uid, vals['employee_id']).journal_id:
+            if not self.pool.get('hr.employee').browse(cr, uid, vals['employee_id'], context=context).journal_id:
                 raise osv.except_osv(_('Configuration Error!'), _('In order to create a timesheet for this employee, you must assign an analytic journal to the employee, like \'Timesheet Journal\'.'))
-        return super(hr_timesheet_sheet, self).create(cr, uid, vals, *args, **argv)
+        if vals.get('attendances_ids'):
+            # If attendances, we sort them by date asc before writing them, to satisfy the alternance constraint
+            vals['attendances_ids'] = self.sort_attendances(cr, uid, vals['attendances_ids'], context=context)
+        return super(hr_timesheet_sheet, self).create(cr, uid, vals, context=context)
 
     def write(self, cr, uid, ids, vals, context=None):
-        if vals.get('attendances_ids'):
-            obj_hr_att = self.pool.get('hr.attendance')
-            delete_ids = [act[1] for act in vals.get('attendances_ids') if act[0] == 2]
-            for delete_att in obj_hr_att.browse(cr, uid, delete_ids, context=context):
-                prev_att_ids = obj_hr_att.search(cr, uid, [('sheet_id', 'in', ids),
-                                                ('name', '<', delete_att.name),
-                                                ('id', 'not in', delete_ids)],
-                                                limit=1, context=context)
-                next_att_ids = obj_hr_att.search(cr, uid, [('sheet_id', 'in', ids),
-                                                ('name', '>', delete_att.name),
-                                                ('id', 'not in', delete_ids)],
-                                                limit=1, order="name", context=context) #by default it's descending but we require ascending to get first record
-                prev_atts = obj_hr_att.browse(cr, uid, prev_att_ids, context=context)
-                next_atts = obj_hr_att.browse(cr, uid, next_att_ids, context=context)
-
-                if prev_atts and next_atts:
-                    if prev_atts[0].action == next_atts[0].action:
-                        raise osv.except_osv(_('Warning !'), _('You are trying ' \
-                            'to delete inside attendance entry which is not ' \
-                            'allowed from here ! \n OR \n You are trying to ' \
-                            'delete same action entries ! \n Please try to ' \
-                            'delete this entry from Attendance list'))
-
         if 'employee_id' in vals:
             new_user_id = self.pool.get('hr.employee').browse(cr, uid, vals['employee_id'], context=context).user_id.id or False
             if not new_user_id:
@@ -110,7 +90,32 @@ class hr_timesheet_sheet(osv.osv):
                 raise osv.except_osv(_('Error!'), _('In order to create a timesheet for this employee, you must link the employee to a product.'))
             if not self.pool.get('hr.employee').browse(cr, uid, vals['employee_id'], context=context).journal_id:
                 raise osv.except_osv(_('Configuration Error!'), _('In order to create a timesheet for this employee, you must assign an analytic journal to the employee, like \'Timesheet Journal\'.'))
-        return super(hr_timesheet_sheet, self).write(cr, uid, ids, vals, context=context)
+        if vals.get('attendances_ids'):
+            # If attendances, we sort them by date asc before writing them, to satisfy the alternance constraint
+            # In addition to the date order, deleting attendances are done before inserting attendances
+            vals['attendances_ids'] = self.sort_attendances(cr, uid, vals['attendances_ids'], context=context)
+        res = super(hr_timesheet_sheet, self).write(cr, uid, ids, vals, context=context)
+        if vals.get('attendances_ids'):
+            for timesheet in self.browse(cr, uid, ids):
+                if not self.pool['hr.attendance']._altern_si_so(cr, uid, [att.id for att in timesheet.attendances_ids]):
+                    raise osv.except_osv(_('Warning !'), _('Error ! Sign in (resp. Sign out) must follow Sign out (resp. Sign in)'))
+        return res
+
+    def sort_attendances(self, cr, uid, attendance_tuples, context=None):
+        date_attendances = []
+        for att_tuple in attendance_tuples:
+            if att_tuple[0] in [0,1,4]:
+                if att_tuple[0] in [0,1]:
+                    name = att_tuple[2]['name']
+                else:
+                    name = self.pool['hr.attendance'].browse(cr, uid, att_tuple[1]).name
+                date_attendances.append((1, name, att_tuple))
+            elif att_tuple[0] in [2,3]:
+                date_attendances.append((0, self.pool['hr.attendance'].browse(cr, uid, att_tuple[1]).name, att_tuple))
+            else: 
+                date_attendances.append((0, False, att_tuple))
+        date_attendances.sort()
+        return [att[2] for att in date_attendances]
 
     def button_confirm(self, cr, uid, ids, context=None):
         for sheet in self.browse(cr, uid, ids, context=context):
@@ -409,29 +414,56 @@ class hr_attendance(osv.osv):
             attendance_ids.extend([row[0] for row in cr.fetchall()])
         return attendance_ids
 
+    def _get_attendance_employee_tz(self, cr, uid, employee_id, date, context=None):
+        """ Simulate timesheet in employee timezone
+
+        Return the attendance date in string format in the employee
+        tz converted from utc timezone as we consider date of employee
+        timesheet is in employee timezone
+        """
+        employee_obj = self.pool['hr.employee']
+
+        tz = False
+        if employee_id:
+            employee = employee_obj.browse(cr, uid, employee_id, context=context)
+            tz = employee.user_id.partner_id.tz
+
+        if not date:
+            date = time.strftime(DEFAULT_SERVER_DATETIME_FORMAT)
+
+        att_tz = timezone(tz or 'utc')
+
+        attendance_dt = datetime.strptime(date, DEFAULT_SERVER_DATETIME_FORMAT)
+        att_tz_dt = pytz.utc.localize(attendance_dt)
+        att_tz_dt = att_tz_dt.astimezone(att_tz)
+        # We take only the date omiting the hours as we compare with timesheet
+        # date_from which is a date format thus using hours would lead to
+        # be out of scope of timesheet
+        att_tz_date_str = datetime.strftime(att_tz_dt, DEFAULT_SERVER_DATE_FORMAT)
+        return att_tz_date_str
+
+    def _get_current_sheet(self, cr, uid, employee_id, date=False, context=None):
+
+        sheet_obj = self.pool['hr_timesheet_sheet.sheet']
+        if not date:
+            date = time.strftime(DEFAULT_SERVER_DATETIME_FORMAT)
+
+        att_tz_date_str = self._get_attendance_employee_tz(
+                cr, uid, employee_id,
+                date=date, context=context)
+        sheet_ids = sheet_obj.search(cr, uid,
+            [('date_from', '<=', att_tz_date_str),
+             ('date_to', '>=', att_tz_date_str),
+             ('employee_id', '=', employee_id)],
+            limit=1, context=context)
+        return sheet_ids and sheet_ids[0] or False
+
     def _sheet(self, cursor, user, ids, name, args, context=None):
-        sheet_obj = self.pool.get('hr_timesheet_sheet.sheet')
         res = {}.fromkeys(ids, False)
         for attendance in self.browse(cursor, user, ids, context=context):
-
-            # Simulate timesheet in employee timezone
-            att_tz = timezone(attendance.employee_id.user_id.partner_id.tz or 'utc')
-
-            attendance_dt = datetime.strptime(attendance.name, DEFAULT_SERVER_DATETIME_FORMAT)
-            att_tz_dt = pytz.utc.localize(attendance_dt)
-            att_tz_dt = att_tz_dt.astimezone(att_tz)
-            # We take only the date omiting the hours as we compare with timesheet
-            # date_from which is a date format thus using hours would lead to
-            # be out of scope of timesheet
-            att_tz_date_str = datetime.strftime(att_tz_dt, DEFAULT_SERVER_DATE_FORMAT)
-            sheet_ids = sheet_obj.search(cursor, user,
-                [('date_from', '<=', att_tz_date_str),
-                 ('date_to', '>=', att_tz_date_str),
-                 ('employee_id', '=', attendance.employee_id.id)],
-                context=context)
-            if sheet_ids:
-                # [0] because only one sheet possible for an employee between 2 dates
-                res[attendance.id] = sheet_obj.name_get(cursor, user, sheet_ids, context=context)[0]
+            res[attendance.id] = self._get_current_sheet(
+                    cursor, user, attendance.employee_id.id, attendance.name,
+                    context=context)
         return res
 
     _columns = {
@@ -450,16 +482,18 @@ class hr_attendance(osv.osv):
     def create(self, cr, uid, vals, context=None):
         if context is None:
             context = {}
-        if 'sheet_id' in context:
-            ts = self.pool.get('hr_timesheet_sheet.sheet').browse(cr, uid, context['sheet_id'], context=context)
+
+        sheet_id = context.get('sheet_id') or self._get_current_sheet(cr, uid, vals.get('employee_id'), vals.get('name'), context=context)
+        if sheet_id:
+            att_tz_date_str = self._get_attendance_employee_tz(
+                    cr, uid, vals.get('employee_id'),
+                   date=vals.get('name'), context=context)
+            ts = self.pool.get('hr_timesheet_sheet.sheet').browse(cr, uid, sheet_id, context=context)
             if ts.state not in ('draft', 'new'):
-                raise osv.except_osv(_('Error!'), _('You cannot modify an entry in a confirmed timesheet.'))
-        res = super(hr_attendance,self).create(cr, uid, vals, context=context)
-        if 'sheet_id' in context:
-            if context['sheet_id'] != self.browse(cr, uid, res, context=context).sheet_id.id:
-                raise osv.except_osv(_('User Error!'), _('You cannot enter an attendance ' \
-                        'date outside the current timesheet dates.'))
-        return res
+                raise osv.except_osv(_('Error!'), _('You can not enter an attendance in a submitted timesheet. Ask your manager to reset it before adding attendance.'))
+            elif ts.date_from > att_tz_date_str or ts.date_to < att_tz_date_str:
+                raise osv.except_osv(_('User Error!'), _('You can not enter an attendance date outside the current timesheet dates.'))
+        return super(hr_attendance,self).create(cr, uid, vals, context=context)
 
     def unlink(self, cr, uid, ids, *args, **kwargs):
         if isinstance(ids, (int, long)):

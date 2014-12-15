@@ -488,10 +488,15 @@ class pos_order(osv.osv):
     _description = "Point of Sale"
     _order = "id desc"
 
-    def create_from_ui(self, cr, uid, orders, context=None):
-        #_logger.info("orders: %r", orders)
+    def create_from_ui(self, cr, uid, orders, context=None):      
+        # Keep only new orders
+        submitted_references = [o['data']['name'] for o in orders]
+        existing_order_ids = self.search(cr, uid, [('pos_reference', 'in', submitted_references)], context=context)
+        existing_orders = self.read(cr, uid, existing_order_ids, ['pos_reference'], context=context)
+        existing_references = set([o['pos_reference'] for o in existing_orders])
+        orders_to_save = [o for o in orders if o['data']['name'] not in existing_references]
         order_ids = []
-        for tmp_order in orders:
+        for tmp_order in orders_to_save:
             order = tmp_order['data']
             order_id = self.create(cr, uid, {
                 'name': order['name'],
@@ -529,7 +534,10 @@ class pos_order(osv.osv):
                 }, context=context)
             order_ids.append(order_id)
             wf_service = netsvc.LocalService("workflow")
-            wf_service.trg_validate(uid, 'pos.order', order_id, 'paid', cr)
+            try:
+                wf_service.trg_validate(uid, 'pos.order', order_id, 'paid', cr)
+            except Exception:
+                _logger.error('ERROR: Could not fully process the POS Order', exc_info=True)
         return order_ids
 
     def write(self, cr, uid, ids, vals, context=None):
@@ -684,8 +692,6 @@ class pos_order(osv.osv):
         move_obj = self.pool.get('stock.move')
 
         for order in self.browse(cr, uid, ids, context=context):
-            if not order.state=='draft':
-                continue
             addr = order.partner_id and partner_obj.address_get(cr, uid, [order.partner_id.id], ['delivery']) or {}
             picking_id = picking_obj.create(cr, uid, {
                 'origin': order.name,
@@ -1128,8 +1134,8 @@ class pos_order(osv.osv):
         return self.write(cr, uid, ids, {'state': 'payment'}, context=context)
 
     def action_paid(self, cr, uid, ids, context=None):
-        self.create_picking(cr, uid, ids, context=context)
         self.write(cr, uid, ids, {'state': 'paid'}, context=context)
+        self.create_picking(cr, uid, ids, context=context)
         return True
 
     def action_cancel(self, cr, uid, ids, context=None):
